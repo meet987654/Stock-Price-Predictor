@@ -9,6 +9,9 @@ from tensorflow import keras
 import joblib
 from sklearn.metrics import mean_absolute_percentage_error, r2_score
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.callbacks import EarlyStopping
+import ta
 
 # Set page configuration
 st.set_page_config(
@@ -27,6 +30,33 @@ def load_data():
     return pd.read_csv(data_path, parse_dates=['date'])
 
 data = load_data()
+
+@st.cache_data
+def add_technical_indicators(df):
+    # Add Moving Averages
+    df['SMA_20'] = ta.trend.sma_indicator(df['close'], window=20)
+    df['SMA_50'] = ta.trend.sma_indicator(df['close'], window=50)
+    
+    # Add RSI
+    df['RSI'] = ta.momentum.rsi(df['close'], window=14)
+    
+    # Add MACD
+    macd = ta.trend.MACD(df['close'])
+    df['MACD'] = macd.macd()
+    df['MACD_signal'] = macd.macd_signal()
+    
+    # Add Bollinger Bands
+    bollinger = ta.volatility.BollingerBands(df['close'])
+    df['BB_high'] = bollinger.bollinger_hband()
+    df['BB_low'] = bollinger.bollinger_lband()
+    
+    # Add Volume Features
+    df['Volume_MA'] = ta.trend.sma_indicator(df['volume'], window=20)
+    df['Volume_STD'] = df['volume'].rolling(window=20).std()
+    
+    return df
+
+data = add_technical_indicators(data)
 
 # Sidebar
 st.sidebar.header("Navigation")
@@ -85,25 +115,101 @@ elif page == "Predictions":
         model_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "model")
         
         if model_type == "1. LSTM":
-            # Existing LSTM code
-            model = keras.models.load_model(os.path.join(model_dir, "microsoft_stock_predictor.keras"))
-            scaler = joblib.load(os.path.join(model_dir, "scaler.save"))
-            
-            # Scale the data
-            scaled_data = scaler.transform(dataset)
-            test_data = scaled_data[training_data_len - 60:]
-            x_test = []
-            
-            for i in range(60, len(test_data)):
-                x_test.append(test_data[i-60:i, 0])
+            try:
+                # Prepare data for LSTM
+                scaler = MinMaxScaler(feature_range=(0, 1))
+                scaled_data = scaler.fit_transform(dataset)
                 
-            x_test = np.array(x_test)
-            x_test = np.reshape(x_test, (x_test.shape[0], x_test.shape[1], 1))
-            
-            # Make predictions
-            predictions = model.predict(x_test)
-            predictions = scaler.inverse_transform(predictions)
-            
+                # Create sequences for LSTM
+                def create_sequences(data, seq_length=60):
+                    X, y = [], []
+                    for i in range(seq_length, len(data)):
+                        X.append(data[i-seq_length:i, 0])
+                        y.append(data[i, 0])
+                    return np.array(X), np.array(y)
+                
+                # Load the model
+                model = keras.models.load_model(os.path.join(model_dir, "microsoft_stock_predictor.keras"))
+                
+                # Prepare test data
+                test_data = scaled_data[training_data_len - 60:]
+                X_test, y_test = create_sequences(test_data)
+                X_test = np.reshape(X_test, (X_test.shape[0], X_test.shape[1], 1))
+                
+                # Make predictions
+                predictions = model.predict(X_test)
+                predictions = scaler.inverse_transform(predictions)
+                
+                # Future predictions
+                st.subheader("Future Price Prediction")
+                prediction_days = st.slider("Select number of days to predict ahead", 1, 30, 1)
+                
+                # Get last 60 days for future prediction
+                last_60_days = scaled_data[-60:]
+                future_predictions = []
+                current_sequence = last_60_days.reshape((1, 60, 1))
+                
+                for _ in range(prediction_days):
+                    # Get prediction for next day
+                    next_pred = model.predict(current_sequence)
+                    future_predictions.append(next_pred[0, 0])
+                    
+                    # Update sequence for next prediction
+                    current_sequence = np.roll(current_sequence, -1)
+                    current_sequence[0, -1, 0] = next_pred[0, 0]
+                
+                # Convert future predictions to original scale
+                future_predictions = np.array(future_predictions).reshape(-1, 1)
+                future_prices = scaler.inverse_transform(future_predictions)
+                
+                # Display predictions
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric(
+                        label="Current Price",
+                        value=f"${data['close'].iloc[-1]:.2f}"
+                    )
+                with col2:
+                    st.metric(
+                        label=f"Predicted Price ({prediction_days} days ahead)",
+                        value=f"${future_prices[-1][0]:.2f}",
+                        delta=f"{((future_prices[-1][0] - data['close'].iloc[-1])/data['close'].iloc[-1])*100:.2f}%"
+                    )
+                
+                # Plot predictions
+                st.subheader("Price Predictions")
+                fig = plt.figure(figsize=(12, 6))
+                last_date = data['date'].max()
+                future_dates = pd.date_range(start=last_date, periods=prediction_days + 1, freq='D')[1:]
+                
+                plt.plot(data['date'][-30:], data['close'][-30:], label='Historical Data')
+                plt.plot(future_dates, future_prices, label='Predictions', linestyle='--')
+                plt.title('Stock Price Prediction')
+                plt.xlabel('Date')
+                plt.ylabel('Price ($)')
+                plt.legend()
+                st.pyplot(fig)
+                
+                # Show metrics for historical predictions
+                mape = mean_absolute_percentage_error(
+                    data['close'][training_data_len:].values,
+                    predictions
+                )
+                r2 = r2_score(
+                    data['close'][training_data_len:].values,
+                    predictions
+                )
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("MAPE", f"{mape * 100:.2f}%")
+                with col2:
+                    st.metric("R-squared (R²)", f"{r2:.2f}")
+                    
+            except Exception as e:
+                st.error("Error in LSTM prediction process")
+                st.exception(e)
+        
         else:  # Random Forest
             # Prepare data for Random Forest
             def create_features(data, lookback=60):
