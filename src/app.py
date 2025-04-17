@@ -26,7 +26,8 @@ st.markdown("This application predicts Microsoft stock prices")
 # Load data
 @st.cache_data
 def load_data():
-    data_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "MicrosoftStock.csv")
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    data_path = os.path.join(base_dir, "data", "MicrosoftStock.csv")
     return pd.read_csv(data_path, parse_dates=['date'])
 
 data = load_data()
@@ -111,8 +112,10 @@ elif page == "Predictions":
         dataset = stock_close.values
         training_data_len = int(np.ceil(len(dataset) * 0.95))
         
-        # Define model_dir before using it
-        model_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "model")
+        # Define model_dir correctly by using the project root directory
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        model_dir = os.path.join(base_dir, "model")
+        predictions = None  # Initialize predictions variable
         
         if model_type == "1. LSTM":
             try:
@@ -128,8 +131,13 @@ elif page == "Predictions":
                         y.append(data[i, 0])
                     return np.array(X), np.array(y)
                 
-                # Load the model
-                model = keras.models.load_model(os.path.join(model_dir, "microsoft_stock_predictor.keras"))
+                # Load the model with explicit error handling
+                model_path = os.path.join(model_dir, "microsoft_stock_predictor.keras")
+                if not os.path.exists(model_path):
+                    st.error(f"Model file not found at: {model_path}")
+                    raise FileNotFoundError(f"Model file not found at: {model_path}")
+                    
+                model = keras.models.load_model(model_path)
                 
                 # Prepare test data
                 test_data = scaled_data[training_data_len - 60:]
